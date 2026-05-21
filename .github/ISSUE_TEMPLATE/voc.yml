@@ -1,0 +1,87 @@
+name: VOC / 개선 요청
+description: 버그 신고, 기능 개선·추가, 사용성·성능 이슈 등을 접수합니다.
+title: "[VOC] "
+labels:
+  - voc
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!WARNING]
+        > **⚠️ 사내 정보 작성 금지**
+        > 고객사명·사업명·보안 관련 정보는 적지 마세요.
+        > 부득이한 경우 'H사', 'A프로젝트' 등 **가명 처리** 후 작성해 주세요.
+        > 이 채널은 **공개(Public) 저장소**입니다.
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: 유형
+      description: 이슈 유형을 선택해 주세요.
+      options:
+        - 버그
+        - 기능 개선
+        - 기능 추가
+        - 사용성
+        - 성능
+        - 문서
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 체감 우선순위
+      description: 업무에 미치는 영향도를 기준으로 선택해 주세요.
+      options:
+        - 🔴 시급 (업무 중단 수준)
+        - 🟡 보통 (불편하지만 우회 가능)
+        - 🟢 낮음 (여유 있을 때 처리)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: screen
+    attributes:
+      label: 발생 화면
+      description: 이슈가 발생한 화면을 선택해 주세요.
+      options:
+        - 영상 분석 탭
+        - ROI 설정
+        - 결과 리포트
+        - 설정
+        - 기타·모르겠음
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 상세 설명
+      description: 어떤 상황에서, 어떤 문제가 발생했는지 구체적으로 적어주세요.
+      placeholder: |
+        예) 영상 파일 로드 시 검은 화면이 표시됩니다.
+        - 파일: .mp4, 약 500MB
+        - 다른 영상(소용량)은 정상 로드됨
+        - 재현 빈도: 항상 발생
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 기대 동작
+      description: 어떻게 동작해야 한다고 생각하시나요? (선택)
+      placeholder: 영상이 정상적으로 로드되어 분석 화면이 표시되어야 합니다.
+    validations:
+      required: false
+
+  - type: textarea
+    id: attachments
+    attributes:
+      label: 스크린샷 · 첨부 파일
+      description: 관련 이미지나 파일을 첨부해 주세요. (선택)
+      placeholder: 이미지는 여기에 드래그앤드롭하거나 클립보드에서 붙여넣기(Ctrl+V) 하세요.
+    validations:
+      required: false

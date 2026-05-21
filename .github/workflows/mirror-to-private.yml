@@ -1,0 +1,217 @@
+name: VOC 미러링 — Public → Private
+
+# Public 레포에 등록된 VOC 이슈를 Private 레포에 자동으로 미러링합니다.
+on:
+  issues:
+    types: [opened, edited, closed, reopened]
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write   # Public 이슈에 코멘트 추가용
+
+    steps:
+      - name: VOC 미러링 처리
+        uses: actions/github-script@v7
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // ──────────────────────────────────────────────
+            // 설정값
+            // ──────────────────────────────────────────────
+            const PRIVATE_OWNER = 'minsko-phd';
+            const PRIVATE_REPO  = 'SmartFLO';
+            const VOC_LABELS    = ['voc', 'needs-triage'];
+
+            const publicIssue = context.payload.issue;
+            const action      = context.payload.action;
+            const publicUrl   = publicIssue.html_url;
+            const author      = publicIssue.user.login;
+            const body        = publicIssue.body || '';
+
+            // Private 레포 접근용 Octokit 인스턴스
+            const { Octokit } = require('@octokit/rest');
+            const privateOctokit = new Octokit({ auth: process.env.PRIVATE_REPO_PAT });
+
+            // ──────────────────────────────────────────────
+            // 헬퍼: 본문에서 mirror issue 번호 파싱
+            // ──────────────────────────────────────────────
+            function parseMirrorIssueNumber(text) {
+              const match = text.match(/<!--\s*mirror-issue:\s*(\d+)\s*-->/);
+              return match ? parseInt(match[1], 10) : null;
+            }
+
+            // ──────────────────────────────────────────────
+            // 헬퍼: VOC 폼 필드 파싱 (유형, 우선순위, 화면)
+            // ──────────────────────────────────────────────
+            function parseFormField(text, label) {
+              const regex = new RegExp(`###\\s*${label}\\s*\\n([\\s\\S]*?)(?=###|$)`);
+              const match = text.match(regex);
+              if (!match) return '(미입력)';
+              return match[1].trim().split('\n')[0].trim() || '(미입력)';
+            }
+
+            // ──────────────────────────────────────────────
+            // 헬퍼: Public 이슈에 코멘트 추가
+            // ──────────────────────────────────────────────
+            async function addPublicComment(message) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: publicIssue.number,
+                body: `${message}\n\n_(자동 메시지)_`,
+              });
+            }
+
+            // ──────────────────────────────────────────────
+            // 헬퍼: Public 이슈 본문 끝에 hidden 코멘트 추가
+            // ──────────────────────────────────────────────
+            async function saveMirrorNumber(mirrorNumber) {
+              const newBody = `${body}\n\n<!-- mirror-issue: ${mirrorNumber} -->`;
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: publicIssue.number,
+                body: newBody,
+              });
+            }
+
+            // ──────────────────────────────────────────────
+            // 이슈 opened: 미러 이슈 신규 생성
+            // ──────────────────────────────────────────────
+            if (action === 'opened') {
+              // 멱등성: 이미 mirror-issue 번호가 있으면 중복 미러링 방지
+              if (parseMirrorIssueNumber(body) !== null) {
+                console.log('이미 미러링된 이슈입니다. 건너뜁니다.');
+                return;
+              }
+
+              const type     = parseFormField(body, '유형');
+              const priority = parseFormField(body, '체감 우선순위');
+              const screen   = parseFormField(body, '발생 화면');
+
+              const mirrorBody = [
+                `> 🔗 원본: ${publicUrl}`,
+                `> 작성자: @${author}`,
+                `> 유형: ${type} | 우선순위: ${priority} | 화면: ${screen}`,
+                '',
+                body,
+              ].join('\n');
+
+              try {
+                const { data: mirrorIssue } = await privateOctokit.rest.issues.create({
+                  owner: PRIVATE_OWNER,
+                  repo:  PRIVATE_REPO,
+                  title: publicIssue.title,
+                  body:  mirrorBody,
+                  labels: VOC_LABELS,
+                });
+
+                console.log(`미러 이슈 생성됨: #${mirrorIssue.number}`);
+
+                // Public 이슈 본문에 mirror 번호 저장
+                await saveMirrorNumber(mirrorIssue.number);
+
+                // Public 이슈에 접수 완료 코멘트
+                await addPublicComment(
+                  '✅ 내부 트래커에 등록되었습니다. 검토 후 회신드리겠습니다.'
+                );
+              } catch (err) {
+                console.error('미러링 실패:', err.message);
+                await addPublicComment(
+                  '⚠️ 자동 미러링이 실패했습니다. 팀장이 수동으로 확인합니다.'
+                );
+              }
+            }
+
+            // ──────────────────────────────────────────────
+            // 이슈 edited: 미러 이슈 본문 동기화
+            // ──────────────────────────────────────────────
+            else if (action === 'edited') {
+              const mirrorNumber = parseMirrorIssueNumber(body);
+              if (mirrorNumber === null) {
+                console.log('mirror-issue 번호를 찾을 수 없습니다. 건너뜁니다.');
+                return;
+              }
+
+              const type     = parseFormField(body, '유형');
+              const priority = parseFormField(body, '체감 우선순위');
+              const screen   = parseFormField(body, '발생 화면');
+
+              const mirrorBody = [
+                `> 🔗 원본: ${publicUrl}`,
+                `> 작성자: @${author}`,
+                `> 유형: ${type} | 우선순위: ${priority} | 화면: ${screen}`,
+                '',
+                body,
+              ].join('\n');
+
+              try {
+                await privateOctokit.rest.issues.update({
+                  owner:        PRIVATE_OWNER,
+                  repo:         PRIVATE_REPO,
+                  issue_number: mirrorNumber,
+                  title:        publicIssue.title,
+                  body:         mirrorBody,
+                });
+                console.log(`미러 이슈 #${mirrorNumber} 본문 업데이트 완료`);
+              } catch (err) {
+                console.error('미러 이슈 업데이트 실패:', err.message);
+                // edited 실패는 Public 이슈에 코멘트 없이 조용히 처리
+              }
+            }
+
+            // ──────────────────────────────────────────────
+            // 이슈 closed: 미러 이슈도 close
+            // ──────────────────────────────────────────────
+            else if (action === 'closed') {
+              const mirrorNumber = parseMirrorIssueNumber(body);
+              if (mirrorNumber === null) {
+                console.log('mirror-issue 번호를 찾을 수 없습니다. 건너뜁니다.');
+                return;
+              }
+
+              try {
+                await privateOctokit.rest.issues.update({
+                  owner:        PRIVATE_OWNER,
+                  repo:         PRIVATE_REPO,
+                  issue_number: mirrorNumber,
+                  state:        'closed',
+                });
+                await privateOctokit.rest.issues.createComment({
+                  owner:        PRIVATE_OWNER,
+                  repo:         PRIVATE_REPO,
+                  issue_number: mirrorNumber,
+                  body:         '원본 이슈가 close되어 동기화됨\n\n_(자동 메시지)_',
+                });
+                console.log(`미러 이슈 #${mirrorNumber} close 완료`);
+              } catch (err) {
+                console.error('미러 이슈 close 실패:', err.message);
+              }
+            }
+
+            // ──────────────────────────────────────────────
+            // 이슈 reopened: 미러 이슈도 reopen
+            // ──────────────────────────────────────────────
+            else if (action === 'reopened') {
+              const mirrorNumber = parseMirrorIssueNumber(body);
+              if (mirrorNumber === null) {
+                console.log('mirror-issue 번호를 찾을 수 없습니다. 건너뜁니다.');
+                return;
+              }
+
+              try {
+                await privateOctokit.rest.issues.update({
+                  owner:        PRIVATE_OWNER,
+                  repo:         PRIVATE_REPO,
+                  issue_number: mirrorNumber,
+                  state:        'open',
+                });
+                console.log(`미러 이슈 #${mirrorNumber} reopen 완료`);
+              } catch (err) {
+                console.error('미러 이슈 reopen 실패:', err.message);
+              }
+            }
