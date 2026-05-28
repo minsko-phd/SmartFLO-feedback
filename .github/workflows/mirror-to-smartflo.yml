@@ -14,7 +14,7 @@ jobs:
       - name: VOC 미러링 처리
         uses: actions/github-script@v7
         env:
-          SMARTFLO_PAT: ${{ secrets.SMARTFLO_PAT }}
+          SMARTFLO_PAT: ${{ secrets.SMARTFLO_PAT || secrets.PRIVATE_REPO_PAT }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
