@@ -1,6 +1,5 @@
 name: VOC 미러링 + AI 분석 — Public → Private
 
-# Public 레포에 등록된 VOC 이슈를 Private 레포에 자동으로 미러링하고 AI 분석합니다.
 on:
   issues:
     types: [opened, edited, closed, reopened]
@@ -9,20 +8,17 @@ jobs:
   mirror:
     runs-on: ubuntu-latest
     permissions:
-      issues: write   # Public 이슈에 코멘트 추가용
+      issues: write
 
     steps:
-      - name: VOC 미러링 + AI 분석 처리
+      - name: VOC 미러링 처리
         uses: actions/github-script@v7
         env:
-          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+          SMARTFLO_PAT: ${{ secrets.SMARTFLO_PAT }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            // ──────────────────────────────────────────────
-            // 설정값
-            // ──────────────────────────────────────────────
             const PRIVATE_OWNER   = 'minsko-phd';
             const PRIVATE_REPO    = 'SmartFLO';
             const VOC_LABELS      = ['voc', 'needs-triage'];
@@ -34,15 +30,31 @@ jobs:
             const author      = publicIssue.user.login;
             const body        = publicIssue.body || '';
 
-            // Private 레포 접근은 fetch로 직접 호출
-            // (github-script 런타임에 @octokit/rest, @actions/github 모듈을
-            //  require할 수 없어, REST API를 fetch로 직접 호출)
-            const PRIVATE_API_BASE = 'https://api.github.com';
+            // ── 공개 레포 라벨 보장 (없으면 생성, 422=이미 존재는 무시) ──
+            const REQUIRED_LABELS = [
+              { name: 'voc',          color: '0075ca', description: '현장 의견' },
+              { name: 'needs-triage', color: 'e4e669', description: '분류 대기' },
+              { name: 'mirrored',     color: 'bfd4f2', description: 'SmartFLO로 미러링 완료' },
+              { name: 'resolved',     color: '0e8a16', description: '처리 완료' },
+            ];
+            for (const label of REQUIRED_LABELS) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo:  context.repo.repo,
+                  ...label,
+                });
+              } catch (e) {
+                if (e.status !== 422) console.warn(`라벨 생성 실패 (${label.name}):`, e.message);
+              }
+            }
+
+            // ── Private API 헬퍼 ──
             async function privateApi(path, options = {}) {
-              const res = await fetch(`${PRIVATE_API_BASE}${path}`, {
+              const res = await fetch(`https://api.github.com${path}`, {
                 ...options,
                 headers: {
-                  'Authorization': `token ${process.env.PRIVATE_REPO_PAT}`,
+                  'Authorization': `token ${process.env.SMARTFLO_PAT}`,
                   'Accept': 'application/vnd.github+json',
                   'X-GitHub-Api-Version': '2022-11-28',
                   'Content-Type': 'application/json',
@@ -56,17 +68,13 @@ jobs:
               return res.status === 204 ? null : res.json();
             }
 
-            // ──────────────────────────────────────────────
-            // 헬퍼: 본문에서 mirror issue 번호 파싱
-            // ──────────────────────────────────────────────
+            // ── 헬퍼: 본문에서 mirror issue 번호 파싱 ──
             function parseMirrorIssueNumber(text) {
               const match = text.match(/<!--\s*mirror-issue:\s*(\d+)\s*-->/);
               return match ? parseInt(match[1], 10) : null;
             }
 
-            // ──────────────────────────────────────────────
-            // 헬퍼: VOC 폼 필드 파싱 (유형, 우선순위, 화면)
-            // ──────────────────────────────────────────────
+            // ── 헬퍼: VOC 폼 필드 파싱 ──
             function parseFormField(text, label) {
               const regex = new RegExp(`###\\s*${label}\\s*\\n([\\s\\S]*?)(?=###|$)`);
               const match = text.match(regex);
@@ -74,9 +82,7 @@ jobs:
               return match[1].trim().split('\n')[0].trim() || '(미입력)';
             }
 
-            // ──────────────────────────────────────────────
-            // 헬퍼: Public 이슈에 코멘트 추가
-            // ──────────────────────────────────────────────
+            // ── 헬퍼: 공개 이슈에 댓글 작성 ──
             async function addPublicComment(message) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -86,9 +92,7 @@ jobs:
               });
             }
 
-            // ──────────────────────────────────────────────
-            // 헬퍼: Public 이슈 본문 끝에 hidden 코멘트 추가
-            // ──────────────────────────────────────────────
+            // ── 헬퍼: 공개 이슈 본문에 mirror 번호 hidden 저장 ──
             async function saveMirrorNumber(mirrorNumber) {
               const newBody = `${body}\n\n<!-- mirror-issue: ${mirrorNumber} -->`;
               await github.rest.issues.update({
@@ -99,16 +103,13 @@ jobs:
               });
             }
 
-            // ──────────────────────────────────────────────
-            // Phase 1: Claude AI로 VOC 분석 후 Private 이슈에 코멘트
-            // ──────────────────────────────────────────────
-            async function analyzeWithAI(title, type, priority, screen, issueBody, mirrorIssueNumber) {
+            // ── Phase 1: Claude AI 분석 → Private 이슈에 댓글 ──
+            async function analyzeWithAI(title, type, priority, area, issueBody, mirrorIssueNumber) {
               const apiKey = process.env.ANTHROPIC_API_KEY;
               if (!apiKey) {
                 console.log('ANTHROPIC_API_KEY 미설정 — AI 분석 건너뜁니다.');
                 return;
               }
-
               const prompt = [
                 '당신은 스마트 팩토리 영상 분석 소프트웨어(SmartFLO)의 품질 분석 전문가입니다.',
                 '사용자가 제출한 VOC(Voice of Customer) 이슈를 검토하고 개발팀을 위한 분석을 작성해주세요.',
@@ -117,7 +118,7 @@ jobs:
                 `제목: ${title}`,
                 `유형: ${type}`,
                 `체감 우선순위: ${priority}`,
-                `발생 화면: ${screen}`,
+                `발생 화면: ${area}`,
                 '상세 설명:',
                 issueBody,
                 '---',
@@ -136,7 +137,6 @@ jobs:
                 '## ⚠️ 영향 범위',
                 '이 이슈가 다른 기능이나 사용자에게 미칠 수 있는 영향을 1~2문장으로 서술하세요.',
               ].join('\n');
-
               try {
                 const res = await fetch('https://api.anthropic.com/v1/messages', {
                   method: 'POST',
@@ -151,16 +151,13 @@ jobs:
                     messages: [{ role: 'user', content: prompt }],
                   }),
                 });
-
                 if (!res.ok) {
                   console.error('Anthropic API 오류:', res.status, await res.text());
                   return;
                 }
-
                 const data = await res.json();
                 const analysisText = data.content?.[0]?.text || '';
                 if (!analysisText) return;
-
                 const comment = [
                   '## 🤖 AI 분석 결과',
                   '',
@@ -171,37 +168,50 @@ jobs:
                   '',
                   '_(자동 메시지)_',
                 ].join('\n');
-
                 await privateApi(
                   `/repos/${PRIVATE_OWNER}/${PRIVATE_REPO}/issues/${mirrorIssueNumber}/comments`,
                   { method: 'POST', body: JSON.stringify({ body: comment }) }
                 );
-
                 console.log(`AI 분석 완료 → Private #${mirrorIssueNumber}에 코멘트 추가`);
               } catch (err) {
-                // AI 분석 실패는 미러링 성공 여부에 영향 없음 — 조용히 처리
                 console.error('AI 분석 중 오류 (무시):', err.message);
               }
             }
 
-            // ──────────────────────────────────────────────
-            // 이슈 opened: 미러 이슈 신규 생성 + AI 분석
-            // ──────────────────────────────────────────────
+            // ══════════════════════════════════════════
+            // 이슈 opened: 미러 이슈 신규 생성
+            // ══════════════════════════════════════════
             if (action === 'opened') {
-              // 멱등성: 이미 mirror-issue 번호가 있으면 중복 미러링 방지
+              // 멱등성: mirrored 라벨이 이미 있거나 hidden 번호가 있으면 중복 방지
+              const currentLabels = publicIssue.labels.map(l => l.name);
+              if (currentLabels.includes('mirrored')) {
+                console.log('mirrored 라벨이 이미 있습니다. 건너뜁니다.');
+                return;
+              }
               if (parseMirrorIssueNumber(body) !== null) {
-                console.log('이미 미러링된 이슈입니다. 건너뜁니다.');
+                console.log('이미 mirror-issue 번호가 있습니다. 건너뜁니다.');
                 return;
               }
 
               const type     = parseFormField(body, '유형');
               const priority = parseFormField(body, '체감 우선순위');
-              const screen   = parseFormField(body, '발생 화면');
+              const area     = parseFormField(body, '발생 화면');
+
+              // 유형에 따라 SmartFLO 이슈에 bug / enhancement 라벨 추가
+              let extraLabel = null;
+              if (type.includes('버그')) {
+                extraLabel = 'bug';
+              } else if (['불편사항', '개선 요청', '새 기능 요청'].includes(type)) {
+                extraLabel = 'enhancement';
+              }
+              const mirrorLabels = extraLabel
+                ? [...VOC_LABELS, extraLabel]
+                : [...VOC_LABELS];
 
               const mirrorBody = [
                 `> 🔗 원본: ${publicUrl}`,
                 `> 작성자: @${author}`,
-                `> 유형: ${type} | 우선순위: ${priority} | 화면: ${screen}`,
+                `> 유형: ${type} | 우선순위: ${priority} | 화면: ${area}`,
                 '',
                 body,
               ].join('\n');
@@ -214,88 +224,80 @@ jobs:
                     body: JSON.stringify({
                       title:  publicIssue.title,
                       body:   mirrorBody,
-                      labels: VOC_LABELS,
+                      labels: mirrorLabels,
                     }),
                   }
                 );
+                console.log(`미러 이슈 생성됨: SmartFLO#${mirrorIssue.number}`);
 
-                console.log(`미러 이슈 생성됨: #${mirrorIssue.number}`);
-
-                // Public 이슈 본문에 mirror 번호 저장
+                // 공개 이슈 본문에 mirror 번호 저장
                 await saveMirrorNumber(mirrorIssue.number);
 
-                // Public 이슈에 접수 완료 코멘트
+                // 공개 이슈에 voc·needs-triage·mirrored 라벨 부착
+                // (이슈 폼 제출 시점에 라벨이 없었어도 여기서 보정)
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo:  context.repo.repo,
+                  issue_number: publicIssue.number,
+                  labels: ['voc', 'needs-triage', 'mirrored'],
+                });
+
+                // 공개 이슈에 접수 완료 댓글
                 await addPublicComment(
-                  '✅ 내부 트래커에 등록되었습니다. 검토 후 회신드리겠습니다.'
+                  `✅ SmartFLO 개발팀에 전달되었습니다 — 처리 번호: #${mirrorIssue.number}\n검토 후 회신드리겠습니다.`
                 );
 
-                // Phase 1: AI 분석 (ANTHROPIC_API_KEY 없으면 자동 건너뜀)
                 await analyzeWithAI(
-                  publicIssue.title,
-                  type,
-                  priority,
-                  screen,
-                  body,
-                  mirrorIssue.number
+                  publicIssue.title, type, priority, area, body, mirrorIssue.number
                 );
               } catch (err) {
                 console.error('미러링 실패:', err.message);
-                await addPublicComment(
-                  '⚠️ 자동 미러링이 실패했습니다. 팀장이 수동으로 확인합니다.'
-                );
+                core.setFailed(`미러링 실패: ${err.message}`);
               }
             }
 
-            // ──────────────────────────────────────────────
+            // ══════════════════════════════════════════
             // 이슈 edited: 미러 이슈 본문 동기화
-            // ──────────────────────────────────────────────
+            // ══════════════════════════════════════════
             else if (action === 'edited') {
               const mirrorNumber = parseMirrorIssueNumber(body);
               if (mirrorNumber === null) {
                 console.log('mirror-issue 번호를 찾을 수 없습니다. 건너뜁니다.');
                 return;
               }
-
               const type     = parseFormField(body, '유형');
               const priority = parseFormField(body, '체감 우선순위');
-              const screen   = parseFormField(body, '발생 화면');
-
+              const area     = parseFormField(body, '발생 화면');
               const mirrorBody = [
                 `> 🔗 원본: ${publicUrl}`,
                 `> 작성자: @${author}`,
-                `> 유형: ${type} | 우선순위: ${priority} | 화면: ${screen}`,
+                `> 유형: ${type} | 우선순위: ${priority} | 화면: ${area}`,
                 '',
                 body,
               ].join('\n');
-
               try {
                 await privateApi(
                   `/repos/${PRIVATE_OWNER}/${PRIVATE_REPO}/issues/${mirrorNumber}`,
                   {
                     method: 'PATCH',
-                    body: JSON.stringify({
-                      title: publicIssue.title,
-                      body:  mirrorBody,
-                    }),
+                    body: JSON.stringify({ title: publicIssue.title, body: mirrorBody }),
                   }
                 );
                 console.log(`미러 이슈 #${mirrorNumber} 본문 업데이트 완료`);
               } catch (err) {
                 console.error('미러 이슈 업데이트 실패:', err.message);
-                // edited 실패는 Public 이슈에 코멘트 없이 조용히 처리
               }
             }
 
-            // ──────────────────────────────────────────────
+            // ══════════════════════════════════════════
             // 이슈 closed: 미러 이슈도 close
-            // ──────────────────────────────────────────────
+            // ══════════════════════════════════════════
             else if (action === 'closed') {
               const mirrorNumber = parseMirrorIssueNumber(body);
               if (mirrorNumber === null) {
                 console.log('mirror-issue 번호를 찾을 수 없습니다. 건너뜁니다.');
                 return;
               }
-
               try {
                 await privateApi(
                   `/repos/${PRIVATE_OWNER}/${PRIVATE_REPO}/issues/${mirrorNumber}`,
@@ -311,16 +313,15 @@ jobs:
               }
             }
 
-            // ──────────────────────────────────────────────
+            // ══════════════════════════════════════════
             // 이슈 reopened: 미러 이슈도 reopen
-            // ──────────────────────────────────────────────
+            // ══════════════════════════════════════════
             else if (action === 'reopened') {
               const mirrorNumber = parseMirrorIssueNumber(body);
               if (mirrorNumber === null) {
                 console.log('mirror-issue 번호를 찾을 수 없습니다. 건너뜁니다.');
                 return;
               }
-
               try {
                 await privateApi(
                   `/repos/${PRIVATE_OWNER}/${PRIVATE_REPO}/issues/${mirrorNumber}`,
