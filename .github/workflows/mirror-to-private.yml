@@ -34,10 +34,27 @@ jobs:
             const author      = publicIssue.user.login;
             const body        = publicIssue.body || '';
 
-            // Private 레포 접근용 Octokit 인스턴스
-            // (github-script 런타임에 @octokit/rest 모듈이 없으므로
-            //  @actions/github의 getOctokit 헬퍼로 두 번째 인스턴스 생성)
-            const privateOctokit = require('@actions/github').getOctokit(process.env.PRIVATE_REPO_PAT);
+            // Private 레포 접근은 fetch로 직접 호출
+            // (github-script 런타임에 @octokit/rest, @actions/github 모듈을
+            //  require할 수 없어, REST API를 fetch로 직접 호출)
+            const PRIVATE_API_BASE = 'https://api.github.com';
+            async function privateApi(path, options = {}) {
+              const res = await fetch(`${PRIVATE_API_BASE}${path}`, {
+                ...options,
+                headers: {
+                  'Authorization': `token ${process.env.PRIVATE_REPO_PAT}`,
+                  'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  'Content-Type': 'application/json',
+                  ...(options.headers || {}),
+                },
+              });
+              if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`Private API ${res.status}: ${text}`);
+              }
+              return res.status === 204 ? null : res.json();
+            }
 
             // ──────────────────────────────────────────────
             // 헬퍼: 본문에서 mirror issue 번호 파싱
@@ -155,12 +172,10 @@ jobs:
                   '_(자동 메시지)_',
                 ].join('\n');
 
-                await privateOctokit.rest.issues.createComment({
-                  owner:        PRIVATE_OWNER,
-                  repo:         PRIVATE_REPO,
-                  issue_number: mirrorIssueNumber,
-                  body:         comment,
-                });
+                await privateApi(
+                  `/repos/${PRIVATE_OWNER}/${PRIVATE_REPO}/issues/${mirrorIssueNumber}/comments`,
+                  { method: 'POST', body: JSON.stringify({ body: comment }) }
+                );
 
                 console.log(`AI 분석 완료 → Private #${mirrorIssueNumber}에 코멘트 추가`);
               } catch (err) {
@@ -192,13 +207,17 @@ jobs:
               ].join('\n');
 
               try {
-                const { data: mirrorIssue } = await privateOctokit.rest.issues.create({
-                  owner:  PRIVATE_OWNER,
-                  repo:   PRIVATE_REPO,
-                  title:  publicIssue.title,
-                  body:   mirrorBody,
-                  labels: VOC_LABELS,
-                });
+                const mirrorIssue = await privateApi(
+                  `/repos/${PRIVATE_OWNER}/${PRIVATE_REPO}/issues`,
+                  {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      title:  publicIssue.title,
+                      body:   mirrorBody,
+                      labels: VOC_LABELS,
+                    }),
+                  }
+                );
 
                 console.log(`미러 이슈 생성됨: #${mirrorIssue.number}`);
 
@@ -250,13 +269,16 @@ jobs:
               ].join('\n');
 
               try {
-                await privateOctokit.rest.issues.update({
-                  owner:        PRIVATE_OWNER,
-                  repo:         PRIVATE_REPO,
-                  issue_number: mirrorNumber,
-                  title:        publicIssue.title,
-                  body:         mirrorBody,
-                });
+                await privateApi(
+                  `/repos/${PRIVATE_OWNER}/${PRIVATE_REPO}/issues/${mirrorNumber}`,
+                  {
+                    method: 'PATCH',
+                    body: JSON.stringify({
+                      title: publicIssue.title,
+                      body:  mirrorBody,
+                    }),
+                  }
+                );
                 console.log(`미러 이슈 #${mirrorNumber} 본문 업데이트 완료`);
               } catch (err) {
                 console.error('미러 이슈 업데이트 실패:', err.message);
@@ -275,18 +297,14 @@ jobs:
               }
 
               try {
-                await privateOctokit.rest.issues.update({
-                  owner:        PRIVATE_OWNER,
-                  repo:         PRIVATE_REPO,
-                  issue_number: mirrorNumber,
-                  state:        'closed',
-                });
-                await privateOctokit.rest.issues.createComment({
-                  owner:        PRIVATE_OWNER,
-                  repo:         PRIVATE_REPO,
-                  issue_number: mirrorNumber,
-                  body:         '원본 이슈가 close되어 동기화됨\n\n_(자동 메시지)_',
-                });
+                await privateApi(
+                  `/repos/${PRIVATE_OWNER}/${PRIVATE_REPO}/issues/${mirrorNumber}`,
+                  { method: 'PATCH', body: JSON.stringify({ state: 'closed' }) }
+                );
+                await privateApi(
+                  `/repos/${PRIVATE_OWNER}/${PRIVATE_REPO}/issues/${mirrorNumber}/comments`,
+                  { method: 'POST', body: JSON.stringify({ body: '원본 이슈가 close되어 동기화됨\n\n_(자동 메시지)_' }) }
+                );
                 console.log(`미러 이슈 #${mirrorNumber} close 완료`);
               } catch (err) {
                 console.error('미러 이슈 close 실패:', err.message);
@@ -304,12 +322,10 @@ jobs:
               }
 
               try {
-                await privateOctokit.rest.issues.update({
-                  owner:        PRIVATE_OWNER,
-                  repo:         PRIVATE_REPO,
-                  issue_number: mirrorNumber,
-                  state:        'open',
-                });
+                await privateApi(
+                  `/repos/${PRIVATE_OWNER}/${PRIVATE_REPO}/issues/${mirrorNumber}`,
+                  { method: 'PATCH', body: JSON.stringify({ state: 'open' }) }
+                );
                 console.log(`미러 이슈 #${mirrorNumber} reopen 완료`);
               } catch (err) {
                 console.error('미러 이슈 reopen 실패:', err.message);
