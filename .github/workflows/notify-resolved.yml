@@ -1,61 +1,34 @@
-name: 처리 완료 알림
+name: 처리 완료 사용자 알림
 
 on:
   issues:
-    types: [labeled, closed]
+    types: [labeled]
 
 jobs:
   notify:
+    if: github.event.label.name == 'resolved'
     runs-on: ubuntu-latest
     permissions:
       issues: write
 
     steps:
-      - name: 처리 완료 알림 전송
+      - name: 처리 완료 댓글 + 이슈 닫기
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const issue  = context.payload.issue;
-            const action = context.payload.action;
-
-            const isResolvedLabel = action === 'labeled' &&
-                                    context.payload.label?.name === 'resolved';
-            const isClosed        = action === 'closed';
-
-            if (!isResolvedLabel && !isClosed) return;
-
-            // closed 이벤트인데 resolved 라벨이 이미 있으면
-            // → labeled 이벤트에서 이미 처리된 것이므로 중복 방지
-            if (isClosed) {
-              const labels = issue.labels.map(l => l.name);
-              if (labels.includes('resolved')) {
-                console.log('resolved 라벨 이벤트에서 이미 처리되었습니다. 건너뜁니다.');
-                return;
-              }
-            }
+            const num = context.payload.issue.number;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
-              repo:  context.repo.repo,
-              issue_number: issue.number,
-              body: [
-                '✅ **처리가 완료되었습니다.**',
-                '',
-                '다음 업데이트에 반영됩니다. 앱을 재시작하면 자동 업데이트 알림이 표시됩니다.',
-                '추가로 불편한 점이 있으시면 새 이슈를 등록해 주세요. 감사합니다!',
-                '',
-                '_(자동 메시지)_',
-              ].join('\n'),
+              repo: context.repo.repo,
+              issue_number: num,
+              body: '🎉 처리가 완료되었습니다!\n\n다음 업데이트에 반영됩니다. 앱을 재시작하면 자동 업데이트 알림이 표시됩니다.\n\n감사합니다 🙏',
             });
 
-            // 이슈가 아직 열려 있으면 닫기
-            if (issue.state !== 'closed') {
-              await github.rest.issues.update({
-                owner: context.repo.owner,
-                repo:  context.repo.repo,
-                issue_number: issue.number,
-                state: 'closed',
-                state_reason: 'completed',
-              });
-            }
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: num,
+              state: 'closed',
+            });
